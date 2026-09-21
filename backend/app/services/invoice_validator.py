@@ -1,5 +1,6 @@
 import logging
-from typing import Dict, Any, List, Optional
+from decimal import Decimal, ROUND_HALF_UP
+from typing import Dict, Any, List, Optional, Union
 from app.schemas.invoice import (
     ValidationResult,
     ValidationCheckResult,
@@ -13,33 +14,102 @@ logger = logging.getLogger("invoice_ai.services.validator")
 # Configurable tolerance to absorb standard currency/rounding precision differences
 TOLERANCE = 0.01
 
+def calculate_tax(
+    taxable_amount: Union[Decimal, float, int, str],
+    tax_rate: Union[Decimal, float, int, str],
+    precision: int = 2
+) -> Decimal:
+    """
+    Deterministically computes tax = taxable_amount * tax_rate / 100
+    using Decimal with ROUND_HALF_UP rounding to eliminate floating-point inaccuracies
+    such as 111.34999999999999.
+    """
+    try:
+        d_amount = Decimal(str(taxable_amount))
+        d_rate = Decimal(str(tax_rate))
+        raw_tax = (d_amount * d_rate) / Decimal("100")
+        quantizer = Decimal("10") ** (-precision)
+        return raw_tax.quantize(quantizer, rounding=ROUND_HALF_UP)
+    except Exception as e:
+        logger.error(f"Error calculating tax for amount {taxable_amount} and rate {tax_rate}: {e}")
+        return Decimal("0.00")
+
+def resolve_taxable_base(
+    subtotal: Optional[float] = None,
+    line_items: Optional[List[Dict[str, Any]]] = None,
+    discount: Optional[float] = None,
+    taxable_amount: Optional[float] = None
+) -> Optional[float]:
+    """
+    Resolves the taxable base without blindly assuming subtotal:
+    1. Explicitly stated taxable amount if present
+    2. Subtotal - Discount if discount is present
+    3. Stated subtotal
+    4. Line items sum
+    """
+    if taxable_amount is not None:
+        try:
+            return round(float(taxable_amount), 2)
+        except (ValueError, TypeError):
+            pass
+
+    disc_val = 0.0
+    if discount is not None:
+        try:
+            disc_val = float(discount)
+        except (ValueError, TypeError):
+            disc_val = 0.0
+
+    if subtotal is not None:
+        try:
+            base = float(subtotal) - disc_val
+            return round(max(0.0, base), 2)
+        except (ValueError, TypeError):
+            pass
+
+    if line_items:
+        try:
+            items_sum = sum(float(it.get("amount", 0.0) or 0.0) for it in line_items)
+            base = items_sum - disc_val
+            return round(max(0.0, base), 2)
+        except (ValueError, TypeError):
+            pass
+
+    return None
+
 class InvoiceValidator:
-    @staticmethod
+    calculate_tax = staticmethod(calculate_tax)
+    resolve_taxable_base = staticmethod(resolve_taxable_base)
+
+    @classmethod
     def calculate_reconciliation(
+        cls,
         line_items: Optional[List[Dict[str, Any]]] = None,
         subtotal: Optional[float] = None,
         tax: Optional[float] = None,
         total: Optional[float] = None,
-        currency: str = "USD"
+        currency: str = "USD",
+        tax_rate: Optional[float] = None,
+        discount: Optional[float] = None,
+        taxable_amount: Optional[float] = None,
+        tax_amount_source: Optional[str] = None
     ) -> ReconciliationResult:
         """
         Independently calculates and reconciles monetary figures:
         A = sum(all line item amounts)
-        B = invoice stated subtotal
-        C = invoice tax + other charges
+        B = invoice stated subtotal (minus discount if applicable)
+        C = invoice tax (extracted or deterministically calculated from stated tax rate)
         D = invoice stated total amount due
 
         Checks:
         1. Line items match subtotal: A == B
         2. Subtotal + tax matches total: B + C == D
         3. Line items + tax matches total: A + C == D
-
-        Preserves original values without overwriting or assuming correctness.
+        4. Tax calculation matches: Taxable base * tax_rate == stated tax
         """
         # A: Sum of line items
         line_items_total: Optional[float] = None
         if line_items is not None and len(line_items) > 0:
-            # Safely sum amounts including negative values (discounts, credits, adjustments)
             try:
                 line_items_total = round(
                     sum(float(item.get("amount", 0.0) or 0.0) for item in line_items), 2
@@ -47,7 +117,7 @@ class InvoiceValidator:
             except (ValueError, TypeError):
                 line_items_total = None
 
-        # B: Stated subtotal (do not invent one if missing)
+        # B: Stated subtotal
         invoice_subtotal: Optional[float] = None
         if subtotal is not None:
             try:
@@ -55,13 +125,60 @@ class InvoiceValidator:
             except (ValueError, TypeError):
                 invoice_subtotal = None
 
-        # C: Stated tax and other charges (do not assume 0 unless explicitly provided)
-        tax_and_other_charges: Optional[float] = None
+        # Discount
+        disc_val = 0.0
+        if discount is not None:
+            try:
+                disc_val = round(float(discount), 2)
+            except (ValueError, TypeError):
+                disc_val = 0.0
+
+        # Taxable Base Resolution
+        resolved_taxable_base = resolve_taxable_base(
+            subtotal=invoice_subtotal,
+            line_items=line_items,
+            discount=disc_val if disc_val > 0 else None,
+            taxable_amount=taxable_amount
+        )
+
+        # Tax rate parsing
+        tax_rate_val: Optional[float] = None
+        if tax_rate is not None:
+            try:
+                tax_rate_val = round(float(tax_rate), 4)
+            except (ValueError, TypeError):
+                tax_rate_val = None
+
+        # Expected Tax calculation using Decimal
+        expected_tax: Optional[float] = None
+        if tax_rate_val is not None and resolved_taxable_base is not None:
+            expected_tax = float(calculate_tax(resolved_taxable_base, tax_rate_val))
+
+        # C: Stated tax vs Fallback calculation
+        raw_tax_val: Optional[float] = None
         if tax is not None:
             try:
-                tax_and_other_charges = round(float(tax), 2)
+                raw_tax_val = round(float(tax), 2)
             except (ValueError, TypeError):
-                tax_and_other_charges = None
+                raw_tax_val = None
+
+        tax_and_other_charges: Optional[float] = raw_tax_val
+        final_tax_source = tax_amount_source or "UNKNOWN"
+
+        is_explicit_zero = (tax_amount_source == "EXPLICIT_ZERO") or (raw_tax_val == 0.0 and tax_rate_val == 0.0)
+
+        if raw_tax_val is None or (raw_tax_val == 0.0 and not is_explicit_zero and tax_amount_source != "EXTRACTED"):
+            # Tax amount missing or 0.0 due to default/missing extraction
+            if tax_rate_val is not None and tax_rate_val > 0.0 and expected_tax is not None:
+                # Deterministic fallback: invoice explicitly provided tax rate, so determine expected tax
+                tax_and_other_charges = expected_tax
+                final_tax_source = "CALCULATED_FROM_RATE"
+            elif raw_tax_val == 0.0:
+                final_tax_source = "EXPLICIT_ZERO" if is_explicit_zero else "MISSING"
+            else:
+                final_tax_source = "MISSING"
+        else:
+            final_tax_source = "EXPLICIT_ZERO" if raw_tax_val == 0.0 else (tax_amount_source or "EXTRACTED")
 
         # D: Stated total amount due
         invoice_total: Optional[float] = None
@@ -71,27 +188,35 @@ class InvoiceValidator:
             except (ValueError, TypeError):
                 invoice_total = None
 
+        # Tax calculation check
+        tax_matches: Optional[bool] = None
+        tax_diff = 0.0
+        if tax_rate_val is not None and expected_tax is not None and tax_and_other_charges is not None:
+            tax_diff = round(abs(tax_and_other_charges - expected_tax), 2)
+            tax_matches = (tax_diff <= TOLERANCE)
+
         # Check 1: Line items match subtotal (A == B)
         check1: Optional[bool] = None
         if line_items_total is not None and invoice_subtotal is not None:
             check1 = round(abs(line_items_total - invoice_subtotal), 2) <= TOLERANCE
 
-        # Check 2: Subtotal + tax matches total (B + C == D)
+        # Check 2: Subtotal (- discount) + tax matches total
         check2: Optional[bool] = None
         if invoice_subtotal is not None and tax_and_other_charges is not None and invoice_total is not None:
-            expected_total_from_sub = round(invoice_subtotal + tax_and_other_charges, 2)
+            expected_total_from_sub = round((invoice_subtotal - disc_val) + tax_and_other_charges, 2)
             check2 = round(abs(expected_total_from_sub - invoice_total), 2) <= TOLERANCE
 
-        # Check 3: Line items + tax matches total (A + C == D)
+        # Check 3: Line items (- discount) + tax matches total
         check3: Optional[bool] = None
         if line_items_total is not None and tax_and_other_charges is not None and invoice_total is not None:
-            expected_total_from_items = round(line_items_total + tax_and_other_charges, 2)
+            expected_total_from_items = round((line_items_total - disc_val) + tax_and_other_charges, 2)
             check3 = round(abs(expected_total_from_items - invoice_total), 2) <= TOLERANCE
 
         checks = ReconciliationChecks(
             line_items_match_subtotal=check1,
             subtotal_plus_tax_matches_total=check2,
-            line_items_plus_tax_matches_total=check3
+            line_items_plus_tax_matches_total=check3,
+            tax_calculation_matches=tax_matches
         )
 
         # Discrepancy & Explanation Synthesis
@@ -102,17 +227,40 @@ class InvoiceValidator:
         message: Optional[str] = None
         explanation: Optional[str] = None
 
-        if check1 is True and check2 is True:
+        if tax_matches is False:
+            # Stated tax does not match expected tax from rate
+            exists = True
+            discrepancy_amount = tax_diff
+            discrepancy_type = "TAX_CALCULATION_MISMATCH"
+            severity = "WARNING"
+            message = (
+                f"Tax Calculation Mismatch: Stated tax ({currency} {tax_and_other_charges:,.2f}) does not match "
+                f"expected tax ({currency} {expected_tax:,.2f}) calculated from stated tax rate ({tax_rate_val:.2f}%). "
+                f"Difference: {currency} {tax_diff:,.2f}."
+            )
+            explanation = (
+                f"The invoice specifies a tax rate of {tax_rate_val:.2f}%. Applied to taxable base "
+                f"({currency} {resolved_taxable_base:,.2f}), the expected tax is {currency} {expected_tax:,.2f}. "
+                f"However, the document states a tax amount of {currency} {tax_and_other_charges:,.2f} "
+                f"(difference: {currency} {tax_diff:,.2f})."
+            )
+
+        elif check1 is True and check2 is True:
             # Case 1: All primary calculations match
             exists = False
             discrepancy_type = "NONE"
             severity = "INFO"
             message = "All monetary calculations and reconciliation checks match."
-            explanation = "The line items, subtotal, tax, and total amount due reconcile consistently across all checks."
+            if final_tax_source == "CALCULATED_FROM_RATE":
+                explanation = (
+                    f"The line items, subtotal, and total amount due reconcile consistently across all checks. "
+                    f"Tax ({currency} {tax_and_other_charges:,.2f}) was calculated from the stated {tax_rate_val:.2f}% tax rate."
+                )
+            else:
+                explanation = "The line items, subtotal, tax, and total amount due reconcile consistently across all checks."
 
         elif check1 is False and check2 is True:
             # Case 2: Line items != Subtotal, but Subtotal + Tax == Total
-            # (The exact issue reported by the user)
             exists = True
             diff = round(abs(line_items_total - invoice_subtotal), 2)
             discrepancy_amount = diff
@@ -134,13 +282,13 @@ class InvoiceValidator:
         elif check1 is True and check2 is False:
             # Case 3: Line items == Subtotal, but Subtotal + Tax != Total
             exists = True
-            expected_total = round(invoice_subtotal + tax_and_other_charges, 2)
+            expected_total = round((invoice_subtotal - disc_val) + (tax_and_other_charges or 0.0), 2)
             diff = round(abs(expected_total - invoice_total), 2)
             discrepancy_amount = diff
             discrepancy_type = "TOTAL_CALCULATION_MISMATCH"
             severity = "WARNING"
             message = (
-                f"Stated subtotal ({currency} {invoice_subtotal:,.2f}) plus tax "
+                f"Mathematical Mismatch: Stated subtotal ({currency} {invoice_subtotal:,.2f}) plus tax "
                 f"({currency} {tax_and_other_charges:,.2f}) equals {currency} {expected_total:,.2f}, "
                 f"which does not match the stated total ({currency} {invoice_total:,.2f}). "
                 f"Difference: {currency} {diff:,.2f}."
@@ -197,6 +345,10 @@ class InvoiceValidator:
             tax_and_other_charges=tax_and_other_charges,
             invoice_total=invoice_total,
             currency=currency,
+            tax_rate=tax_rate_val,
+            taxable_amount=resolved_taxable_base,
+            expected_tax=expected_tax,
+            tax_amount_source=final_tax_source,
             checks=checks,
             discrepancy=discrepancy,
             explanation=explanation
@@ -219,6 +371,10 @@ class InvoiceValidator:
         subtotal = invoice_data.get("subtotal")
         tax = invoice_data.get("tax")
         total = invoice_data.get("total")
+        tax_rate = invoice_data.get("tax_rate")
+        discount = invoice_data.get("discount")
+        taxable_amount = invoice_data.get("taxable_amount")
+        tax_amount_source = invoice_data.get("tax_amount_source")
         invoice_number = invoice_data.get("invoice_number")
         vendor_name = invoice_data.get("vendor_name")
         invoice_date = invoice_data.get("invoice_date")
@@ -229,8 +385,22 @@ class InvoiceValidator:
             subtotal=subtotal,
             tax=tax,
             total=total,
-            currency=currency
+            currency=currency,
+            tax_rate=tax_rate,
+            discount=discount,
+            taxable_amount=taxable_amount,
+            tax_amount_source=tax_amount_source
         )
+
+        # Normalize invoice_data with calculated tax if fallback was applied
+        if recon.tax_amount_source == "CALCULATED_FROM_RATE":
+            invoice_data["tax"] = recon.tax_and_other_charges
+            invoice_data["tax_amount_source"] = "CALCULATED_FROM_RATE"
+            invoice_data["tax_calculation_note"] = f"Tax amount calculated from stated {recon.tax_rate:.2f}% tax rate."
+        elif recon.tax_amount_source:
+            invoice_data["tax_amount_source"] = recon.tax_amount_source
+        if recon.tax_rate is not None and "tax_rate" not in invoice_data:
+            invoice_data["tax_rate"] = recon.tax_rate
 
         # Line-item reconciliation check result
         if recon.checks.line_items_match_subtotal is not None:
@@ -245,6 +415,24 @@ class InvoiceValidator:
                     else f"Line-item sum ({currency} {recon.line_items_total:,.2f}) does not match Subtotal ({currency} {recon.invoice_subtotal:,.2f})."
                 )
             ))
+
+        # Tax Rate Calculation check result
+        if recon.checks.tax_calculation_matches is not None:
+            checks.append(ValidationCheckResult(
+                name="Tax Rate Calculation Check",
+                passed=recon.checks.tax_calculation_matches,
+                expected=f"{currency} {recon.expected_tax:,.2f}",
+                actual=f"{currency} {recon.tax_and_other_charges:,.2f}",
+                message=(
+                    f"Tax calculation matches stated rate ({recon.taxable_amount:,.2f} × {recon.tax_rate:.2f}% = {currency} {recon.expected_tax:,.2f})."
+                    if recon.checks.tax_calculation_matches
+                    else f"Tax calculation mismatch: Expected {currency} {recon.expected_tax:,.2f} ({recon.tax_rate:.2f}% of {currency} {recon.taxable_amount:,.2f}), but stated tax is {currency} {recon.tax_and_other_charges:,.2f}."
+                )
+            ))
+            if not recon.checks.tax_calculation_matches:
+                issues.append(
+                    f"Tax Calculation Mismatch: Stated tax ({currency} {recon.tax_and_other_charges:,.2f}) does not match expected tax ({currency} {recon.expected_tax:,.2f}) calculated from stated tax rate ({recon.tax_rate:.2f}%). Difference: {currency} {abs(recon.tax_and_other_charges - recon.expected_tax):,.2f}."
+                )
 
         # Subtotal + Tax reconciliation check result
         if recon.checks.subtotal_plus_tax_matches_total is not None:
@@ -292,7 +480,7 @@ class InvoiceValidator:
                     item_math_passed = False
                     desc = item.get("description", f"Item #{idx}")
                     issues.append(
-                        f"Line Item Calculation Mismatch on '{desc}': "
+                        f"Line Item Mismatch on '{desc}': "
                         f"{qty} × {currency} {price:.2f} = {currency} {expected_amt:.2f}, but line amount is {currency} {amt:.2f}"
                     )
 

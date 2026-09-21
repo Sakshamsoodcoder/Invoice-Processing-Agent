@@ -30,6 +30,8 @@ class AnomalyDetector:
         vendor_name = invoice_data.get("vendor_name")
         total = invoice_data.get("total") or 0.0
         tax = invoice_data.get("tax") or 0.0
+        tax_rate = invoice_data.get("tax_rate")
+        tax_amount_source = invoice_data.get("tax_amount_source")
         subtotal = invoice_data.get("subtotal") or 0.0
         date_str = invoice_data.get("invoice_date")
         currency = invoice_data.get("currency") or "USD"
@@ -51,8 +53,12 @@ class AnomalyDetector:
         if not vendor_name:
             anomalies.append("Potential Anomaly: Vendor name is unidentifiable or missing from invoice header.")
 
-        # 3. Tax check
-        if subtotal > 50 and tax == 0:
+        # 3. Tax check: only trigger when tax is truly zero/missing and no explicit tax rate is specified
+        has_tax = (tax > 0.0) or (tax_amount_source == "CALCULATED_FROM_RATE")
+        is_explicit_zero_rate = (tax_rate is not None and float(tax_rate) == 0.0)
+        has_positive_rate = (tax_rate is not None and float(tax_rate) > 0.0)
+
+        if not has_tax and not is_explicit_zero_rate and not has_positive_rate and subtotal > 50 and tax == 0:
             anomalies.append("Notice: Zero tax recorded on an invoice exceeding standard exemption thresholds. Please confirm tax exemption status.")
 
         # Note: Monetary reconciliation discrepancies are handled centrally by the

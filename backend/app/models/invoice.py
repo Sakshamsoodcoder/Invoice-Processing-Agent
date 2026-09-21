@@ -16,6 +16,8 @@ class Invoice(Base):
     due_date = Column(String(50), nullable=True)
     subtotal = Column(Float, nullable=True)
     tax = Column(Float, nullable=True)
+    tax_rate = Column(Float, nullable=True)
+    tax_amount_source = Column(String(50), nullable=True)  # EXTRACTED, CALCULATED_FROM_RATE, EXPLICIT_ZERO, MISSING
     total = Column(Float, nullable=True)
     currency = Column(String(10), default="USD")
     payment_terms = Column(String(100), nullable=True)

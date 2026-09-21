@@ -101,7 +101,9 @@ async def process_invoice(
         invoice_date=extracted.get("invoice_date"),
         due_date=extracted.get("due_date"),
         subtotal=extracted.get("subtotal") or 0.0,
-        tax=extracted.get("tax") or 0.0,
+        tax=extracted.get("tax") if extracted.get("tax") is not None else 0.0,
+        tax_rate=extracted.get("tax_rate"),
+        tax_amount_source=extracted.get("tax_amount_source"),
         total=extracted.get("total") or 0.0,
         currency=extracted.get("currency") or "USD",
         payment_terms=extracted.get("payment_terms"),
@@ -243,7 +245,9 @@ def get_invoice_detail(
         subtotal=invoice.subtotal,
         tax=invoice.tax,
         total=invoice.total,
-        currency=invoice.currency or "USD"
+        currency=invoice.currency or "USD",
+        tax_rate=invoice.tax_rate,
+        tax_amount_source=invoice.tax_amount_source
     )
     return inv_response
 
@@ -316,7 +320,9 @@ def export_invoice_report(
         subtotal=invoice.subtotal,
         tax=invoice.tax,
         total=invoice.total,
-        currency=invoice.currency or "USD"
+        currency=invoice.currency or "USD",
+        tax_rate=invoice.tax_rate,
+        tax_amount_source=invoice.tax_amount_source
     )
 
     report = {
@@ -331,6 +337,8 @@ def export_invoice_report(
         "due_date": invoice.due_date,
         "subtotal": invoice.subtotal,
         "tax": invoice.tax,
+        "tax_rate": invoice.tax_rate,
+        "tax_amount_source": invoice.tax_amount_source,
         "total": invoice.total,
         "currency": invoice.currency,
         "status": invoice.status,

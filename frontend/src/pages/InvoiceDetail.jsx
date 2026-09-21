@@ -109,9 +109,26 @@ export const InvoiceDetail = () => {
       ? Math.round(items.reduce((sum, item) => sum + (parseFloat(item.amount) || 0), 0) * 100) / 100
       : null;
     const sub = invoice.subtotal !== null && invoice.subtotal !== undefined ? Number(invoice.subtotal) : null;
-    const tax = invoice.tax !== null && invoice.tax !== undefined ? Number(invoice.tax) : null;
+    const taxRate = invoice.tax_rate !== null && invoice.tax_rate !== undefined ? Number(invoice.tax_rate) : null;
+    let tax = invoice.tax !== null && invoice.tax !== undefined ? Number(invoice.tax) : null;
     const tot = invoice.total !== null && invoice.total !== undefined ? Number(invoice.total) : null;
     const tol = 0.01;
+
+    let expectedTax = null;
+    if (taxRate !== null && sub !== null) {
+      expectedTax = Math.round((sub * (taxRate / 100)) * 100) / 100;
+    }
+
+    let taxSource = invoice.tax_amount_source || 'UNKNOWN';
+    if ((tax === null || (tax === 0 && invoice.tax_amount_source !== 'EXPLICIT_ZERO')) && taxRate > 0 && expectedTax !== null) {
+      tax = expectedTax;
+      taxSource = 'CALCULATED_FROM_RATE';
+    }
+
+    let cTax = null;
+    if (taxRate !== null && expectedTax !== null && tax !== null) {
+      cTax = Math.abs(tax - expectedTax) <= tol;
+    }
 
     const c1 = lineTotal !== null && sub !== null ? Math.abs(lineTotal - sub) <= tol : null;
     const c2 = sub !== null && tax !== null && tot !== null ? Math.abs(Math.round((sub + tax) * 100) / 100 - tot) <= tol : null;
@@ -123,7 +140,13 @@ export const InvoiceDetail = () => {
     let severity = 'INFO';
     let message = null;
 
-    if (c1 === false && c2 === true) {
+    if (cTax === false) {
+      exists = true;
+      diff = Math.round(Math.abs(tax - expectedTax) * 100) / 100;
+      type = 'TAX_CALCULATION_MISMATCH';
+      severity = 'WARNING';
+      message = `Tax calculation mismatch: stated tax (${tax}) does not match expected tax (${expectedTax}) calculated from ${taxRate}% rate.`;
+    } else if (c1 === false && c2 === true) {
       exists = true;
       diff = Math.round(Math.abs(lineTotal - sub) * 100) / 100;
       type = 'SUBTOTAL_LINE_ITEM_MISMATCH';
@@ -149,10 +172,15 @@ export const InvoiceDetail = () => {
       tax_and_other_charges: tax,
       invoice_total: tot,
       currency: invoice.currency || 'USD',
+      tax_rate: taxRate,
+      taxable_amount: sub,
+      expected_tax: expectedTax,
+      tax_amount_source: taxSource,
       checks: {
         line_items_match_subtotal: c1,
         subtotal_plus_tax_matches_total: c2,
         line_items_plus_tax_matches_total: c3,
+        tax_calculation_matches: cTax,
       },
       discrepancy: {
         exists,
@@ -416,6 +444,24 @@ export const InvoiceDetail = () => {
                     )}
                   </div>
 
+                  {recon.checks.tax_calculation_matches !== undefined && recon.checks.tax_calculation_matches !== null && (
+                    <div className="flex items-center justify-between py-1 border-b border-[#252932]/50">
+                      <span className="text-slate-300">
+                        Tax calculation {recon.tax_rate ? `(${recon.tax_rate}%)` : ''}
+                      </span>
+                      {recon.checks.tax_calculation_matches === true && (
+                        <span className="inline-flex items-center gap-1 text-[#8ff59c] font-medium text-xs">
+                          <CheckCircle2 className="w-3.5 h-3.5" /> Matches
+                        </span>
+                      )}
+                      {recon.checks.tax_calculation_matches === false && (
+                        <span className="inline-flex items-center gap-1 text-amber-400 font-medium text-xs">
+                          <AlertTriangle className="w-3.5 h-3.5" /> Mismatch
+                        </span>
+                      )}
+                    </div>
+                  )}
+
                   <div className="flex items-center justify-between py-1">
                     <span className="text-slate-300">Line items + Tax → Total</span>
                     {recon.checks.line_items_plus_tax_matches_total === true && (
@@ -549,7 +595,12 @@ export const InvoiceDetail = () => {
               </div>
 
               <div className="p-3.5 bg-[#12151b] border border-[#252932] rounded-2xl">
-                <span className="text-[#7e8695] text-[10px] uppercase font-bold">Tax Amount</span>
+                <div className="flex items-center justify-center gap-1">
+                  <span className="text-[#7e8695] text-[10px] uppercase font-bold">Tax Amount</span>
+                  {invoice.tax_rate !== null && invoice.tax_rate !== undefined && (
+                    <span className="text-[10px] font-mono text-[#8b8cf8]">({invoice.tax_rate}%)</span>
+                  )}
+                </div>
                 <p className="text-sm font-bold text-white mt-0.5">
                   {formatCurrency(invoice.tax, invoice.currency)}
                 </p>
@@ -562,6 +613,63 @@ export const InvoiceDetail = () => {
                 </p>
               </div>
             </div>
+
+            {/* Detailed Tax Breakdown & Validation Section */}
+            {(invoice.tax_rate !== null && invoice.tax_rate !== undefined) && (
+              <div className="p-4 rounded-2xl bg-[#12151b] border border-[#252932] space-y-2.5 text-xs">
+                <div className="flex items-center justify-between">
+                  <span className="text-[10px] font-bold text-[#7e8695] uppercase tracking-wider">
+                    Tax Details
+                  </span>
+                  {recon.checks.tax_calculation_matches === true && (
+                    <span className="inline-flex items-center gap-1 text-[#8ff59c] text-[10px] font-bold">
+                      <CheckCircle2 className="w-3 h-3" /> Tax calculation matches
+                    </span>
+                  )}
+                  {recon.checks.tax_calculation_matches === false && (
+                    <span className="inline-flex items-center gap-1 text-amber-400 text-[10px] font-bold">
+                      <AlertTriangle className="w-3 h-3" /> Tax calculation mismatch
+                    </span>
+                  )}
+                </div>
+
+                <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
+                  <div className="p-2.5 rounded-xl bg-[#181b21] border border-[#252932]">
+                    <span className="text-[#7e8695] text-[10px] uppercase font-semibold">Tax Rate</span>
+                    <p className="font-mono font-bold text-white mt-0.5">{invoice.tax_rate}%</p>
+                  </div>
+                  <div className="p-2.5 rounded-xl bg-[#181b21] border border-[#252932]">
+                    <span className="text-[#7e8695] text-[10px] uppercase font-semibold">Taxable Amount</span>
+                    <p className="font-mono font-bold text-white mt-0.5">
+                      {formatCurrency(recon.taxable_amount || invoice.subtotal, invoice.currency)}
+                    </p>
+                  </div>
+                  <div className="p-2.5 rounded-xl bg-[#181b21] border border-[#252932]">
+                    <span className="text-[#7e8695] text-[10px] uppercase font-semibold">Tax Applied</span>
+                    <p className="font-mono font-bold text-white mt-0.5">
+                      {formatCurrency(invoice.tax, invoice.currency)}
+                    </p>
+                  </div>
+                  <div className="p-2.5 rounded-xl bg-[#181b21] border border-[#252932]">
+                    <span className="text-[#7e8695] text-[10px] uppercase font-semibold">Expected Tax</span>
+                    <p className="font-mono font-bold text-[#8ff59c] mt-0.5">
+                      {formatCurrency(recon.expected_tax !== null ? recon.expected_tax : invoice.tax, invoice.currency)}
+                    </p>
+                  </div>
+                </div>
+
+                <div className="flex flex-wrap items-center justify-between text-[11px] text-[#7e8695] pt-0.5 gap-2">
+                  <span>
+                    Calculation: {formatCurrency(recon.taxable_amount || invoice.subtotal, invoice.currency)} × {invoice.tax_rate}% = {formatCurrency(recon.expected_tax !== null ? recon.expected_tax : invoice.tax, invoice.currency)}
+                  </span>
+                  {(invoice.tax_amount_source === 'CALCULATED_FROM_RATE' || recon.tax_amount_source === 'CALCULATED_FROM_RATE') && (
+                    <span className="text-[#8b8cf8] font-medium">
+                      Tax amount calculated from stated {invoice.tax_rate}% tax rate.
+                    </span>
+                  )}
+                </div>
+              </div>
+            )}
           </div>
 
           {/* Line Items Table */}

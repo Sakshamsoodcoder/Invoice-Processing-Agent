@@ -36,6 +36,9 @@ class InvoiceBase(BaseModel):
     due_date: Optional[str] = None
     subtotal: Optional[float] = 0.0
     tax: Optional[float] = 0.0
+    tax_rate: Optional[float] = None
+    tax_amount_source: Optional[str] = None
+    tax_calculation_note: Optional[str] = None
     total: Optional[float] = 0.0
     currency: Optional[str] = "USD"
     payment_terms: Optional[str] = None
@@ -52,6 +55,7 @@ class ReconciliationChecks(BaseModel):
     line_items_match_subtotal: Optional[bool] = None
     subtotal_plus_tax_matches_total: Optional[bool] = None
     line_items_plus_tax_matches_total: Optional[bool] = None
+    tax_calculation_matches: Optional[bool] = None
 
 class ReconciliationDiscrepancy(BaseModel):
     exists: bool = False
@@ -66,6 +70,10 @@ class ReconciliationResult(BaseModel):
     tax_and_other_charges: Optional[float] = None
     invoice_total: Optional[float] = None
     currency: str = "USD"
+    tax_rate: Optional[float] = None
+    taxable_amount: Optional[float] = None
+    expected_tax: Optional[float] = None
+    tax_amount_source: Optional[str] = None
     checks: ReconciliationChecks = Field(default_factory=ReconciliationChecks)
     discrepancy: ReconciliationDiscrepancy = Field(default_factory=ReconciliationDiscrepancy)
     explanation: Optional[str] = None
