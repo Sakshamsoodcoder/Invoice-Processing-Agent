@@ -55,12 +55,10 @@ class AnomalyDetector:
         if subtotal > 50 and tax == 0:
             anomalies.append("Notice: Zero tax recorded on an invoice exceeding standard exemption thresholds. Please confirm tax exemption status.")
 
-        # 4. Total vs Subtotal mismatch transferred as anomaly if significant
-        for issue in validation_issues:
-            if "Mathematical Mismatch" in issue or "Subtotal Discrepancy" in issue:
-                anomalies.append(f"Calculation Anomaly: {issue}")
+        # Note: Monetary reconciliation discrepancies are handled centrally by the
+        # InvoiceValidator / Reconciliation engine to prevent duplicate alerts.
 
-        # 5. Negative or zero amount check
+        # 4. Negative or zero amount check
         if total <= 0:
             anomalies.append("Irregular Amount: Total invoice value is zero or negative.")
 

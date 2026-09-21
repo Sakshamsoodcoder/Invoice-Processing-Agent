@@ -151,8 +151,11 @@ async def process_invoice(
 
     mode_label = "production" if (settings.is_azure_doc_intel_configured and settings.is_azure_openai_configured) else "development_mock"
 
+    inv_response = InvoiceResponse.model_validate(invoice)
+    inv_response.reconciliation = validation.reconciliation
+
     return ProcessInvoiceResponse(
-        invoice=InvoiceResponse.model_validate(invoice),
+        invoice=inv_response,
         validation=validation,
         ai_analysis=ai_analysis,
         anomalies=anomalies,
@@ -226,7 +229,23 @@ def get_invoice_detail(
             detail="Invoice not found."
         )
 
-    return InvoiceResponse.model_validate(invoice)
+    inv_response = InvoiceResponse.model_validate(invoice)
+    inv_response.reconciliation = validator.calculate_reconciliation(
+        line_items=[
+            {
+                "description": item.description,
+                "quantity": item.quantity,
+                "unit_price": item.unit_price,
+                "amount": item.amount
+            }
+            for item in invoice.items
+        ],
+        subtotal=invoice.subtotal,
+        tax=invoice.tax,
+        total=invoice.total,
+        currency=invoice.currency or "USD"
+    )
+    return inv_response
 
 @router.delete("/{invoice_id}")
 def delete_invoice(
@@ -284,6 +303,22 @@ def export_invoice_report(
             detail="Invoice not found."
         )
 
+    recon = validator.calculate_reconciliation(
+        line_items=[
+            {
+                "description": item.description,
+                "quantity": item.quantity,
+                "unit_price": item.unit_price,
+                "amount": item.amount
+            }
+            for item in invoice.items
+        ],
+        subtotal=invoice.subtotal,
+        tax=invoice.tax,
+        total=invoice.total,
+        currency=invoice.currency or "USD"
+    )
+
     report = {
         "title": "Invoice Processing Audit Report",
         "app": "InvoiceAI – Intelligent Invoice Processing Assistant",
@@ -301,6 +336,7 @@ def export_invoice_report(
         "status": invoice.status,
         "confidence": invoice.confidence,
         "ai_summary": invoice.summary,
+        "reconciliation": recon.model_dump(),
         "line_items": [
             {
                 "description": item.description,

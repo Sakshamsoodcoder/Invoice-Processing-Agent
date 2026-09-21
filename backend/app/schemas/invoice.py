@@ -48,6 +48,28 @@ class InvoiceBase(BaseModel):
     content_type: Optional[str] = None
     is_mock: Optional[bool] = False
 
+class ReconciliationChecks(BaseModel):
+    line_items_match_subtotal: Optional[bool] = None
+    subtotal_plus_tax_matches_total: Optional[bool] = None
+    line_items_plus_tax_matches_total: Optional[bool] = None
+
+class ReconciliationDiscrepancy(BaseModel):
+    exists: bool = False
+    amount: Optional[float] = None
+    type: Optional[str] = "NONE"
+    severity: Optional[str] = "INFO"
+    message: Optional[str] = None
+
+class ReconciliationResult(BaseModel):
+    line_items_total: Optional[float] = None
+    invoice_subtotal: Optional[float] = None
+    tax_and_other_charges: Optional[float] = None
+    invoice_total: Optional[float] = None
+    currency: str = "USD"
+    checks: ReconciliationChecks = Field(default_factory=ReconciliationChecks)
+    discrepancy: ReconciliationDiscrepancy = Field(default_factory=ReconciliationDiscrepancy)
+    explanation: Optional[str] = None
+
 class InvoiceResponse(InvoiceBase):
     id: int
     user_id: int
@@ -55,6 +77,7 @@ class InvoiceResponse(InvoiceBase):
     updated_at: datetime
     items: List[InvoiceItemResponse] = []
     issues: List[InvoiceIssueResponse] = []
+    reconciliation: Optional[ReconciliationResult] = None
 
     model_config = ConfigDict(from_attributes=True)
 
@@ -77,6 +100,7 @@ class ValidationResult(BaseModel):
     status: str  # Valid or Needs Review
     checks: List[ValidationCheckResult] = []
     issues: List[str] = []
+    reconciliation: Optional[ReconciliationResult] = None
 
 class AnomalyResult(BaseModel):
     has_anomalies: bool

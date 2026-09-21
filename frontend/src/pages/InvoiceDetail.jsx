@@ -102,8 +102,89 @@ export const InvoiceDetail = () => {
     ? invoice.blob_url
     : `${API_BASE_URL}${invoice.blob_url || ''}`;
 
-  const validationIssues = invoice.issues?.filter((i) => i.issue_type === 'validation') || [];
-  const anomalies = invoice.issues?.filter((i) => i.issue_type === 'anomaly') || [];
+  // Structured reconciliation derived from backend or client fallback
+  const recon = invoice.reconciliation || (() => {
+    const items = invoice.items || [];
+    const lineTotal = items.length > 0
+      ? Math.round(items.reduce((sum, item) => sum + (parseFloat(item.amount) || 0), 0) * 100) / 100
+      : null;
+    const sub = invoice.subtotal !== null && invoice.subtotal !== undefined ? Number(invoice.subtotal) : null;
+    const tax = invoice.tax !== null && invoice.tax !== undefined ? Number(invoice.tax) : null;
+    const tot = invoice.total !== null && invoice.total !== undefined ? Number(invoice.total) : null;
+    const tol = 0.01;
+
+    const c1 = lineTotal !== null && sub !== null ? Math.abs(lineTotal - sub) <= tol : null;
+    const c2 = sub !== null && tax !== null && tot !== null ? Math.abs(Math.round((sub + tax) * 100) / 100 - tot) <= tol : null;
+    const c3 = lineTotal !== null && tax !== null && tot !== null ? Math.abs(Math.round((lineTotal + tax) * 100) / 100 - tot) <= tol : null;
+
+    let exists = false;
+    let diff = null;
+    let type = 'NONE';
+    let severity = 'INFO';
+    let message = null;
+
+    if (c1 === false && c2 === true) {
+      exists = true;
+      diff = Math.round(Math.abs(lineTotal - sub) * 100) / 100;
+      type = 'SUBTOTAL_LINE_ITEM_MISMATCH';
+      severity = 'WARNING';
+      message = 'Line-item total does not match the stated invoice subtotal.';
+    } else if (c1 === true && c2 === false) {
+      exists = true;
+      diff = Math.round(Math.abs((sub + tax) - tot) * 100) / 100;
+      type = 'TOTAL_CALCULATION_MISMATCH';
+      severity = 'WARNING';
+      message = 'Stated subtotal plus tax does not match total amount due.';
+    } else if (c1 === false && c2 === false) {
+      exists = true;
+      diff = Math.round(Math.abs(lineTotal - sub) * 100) / 100;
+      type = 'MULTIPLE_CALCULATION_MISMATCHES';
+      severity = 'WARNING';
+      message = 'Multiple calculation inconsistencies detected across document.';
+    }
+
+    return {
+      line_items_total: lineTotal,
+      invoice_subtotal: sub,
+      tax_and_other_charges: tax,
+      invoice_total: tot,
+      currency: invoice.currency || 'USD',
+      checks: {
+        line_items_match_subtotal: c1,
+        subtotal_plus_tax_matches_total: c2,
+        line_items_plus_tax_matches_total: c3,
+      },
+      discrepancy: {
+        exists,
+        amount: diff,
+        type,
+        severity,
+        message,
+      },
+      explanation: invoice.summary,
+    };
+  })();
+
+  // Filter out duplicate calculation & reconciliation alerts so they only appear in the dedicated section
+  const isMathOrReconIssue = (desc) => {
+    if (!desc) return false;
+    const lower = desc.toLowerCase();
+    return (
+      lower.includes('reconciliation warning') ||
+      lower.includes('subtotal discrepancy') ||
+      lower.includes('mathematical mismatch') ||
+      lower.includes('calculation anomaly') ||
+      lower.includes('sum of line items') ||
+      lower.includes('line-item total')
+    );
+  };
+
+  const validationIssues = (invoice.issues || []).filter(
+    (i) => i.issue_type === 'validation' && !isMathOrReconIssue(i.description)
+  );
+  const anomalies = (invoice.issues || []).filter(
+    (i) => i.issue_type === 'anomaly' && !isMathOrReconIssue(i.description)
+  );
 
   return (
     <div className="space-y-6">
@@ -204,7 +285,7 @@ export const InvoiceDetail = () => {
                   <p className="text-xs mt-1 leading-relaxed text-[#a0a8b7]">
                     {isValid
                       ? 'Mathematical consistency checks, tax validations, and line item sums conform accurately.'
-                      : 'Mathematical discrepancies or potential anomalies detected. Review details below prior to payment approval.'}
+                      : 'Mathematical discrepancies or potential anomalies detected. Review reconciliation details below.'}
                   </p>
                 </div>
               </div>
@@ -220,8 +301,155 @@ export const InvoiceDetail = () => {
             </div>
           </div>
 
-          {/* AI Executive Summary Card */}
-          {invoice.summary && (
+          {/* DEDICATED INVOICE RECONCILIATION SECTION */}
+          {recon && (
+            <div className={`p-6 rounded-3xl border shadow-sm space-y-4 ${
+              recon.discrepancy?.exists
+                ? 'bg-[#181b21] border-amber-500/30'
+                : 'bg-[#181b21] border-[#252932]'
+            }`}>
+              <div className="flex items-start justify-between">
+                <div className="flex items-center gap-2.5">
+                  {recon.discrepancy?.exists ? (
+                    <div className="p-2 rounded-xl bg-amber-500/10 text-amber-400 border border-amber-500/20">
+                      <AlertTriangle className="w-5 h-5" />
+                    </div>
+                  ) : (
+                    <div className="p-2 rounded-xl bg-[#8ff59c]/10 text-[#8ff59c] border border-[#8ff59c]/20">
+                      <CheckCircle2 className="w-5 h-5" />
+                    </div>
+                  )}
+                  <div>
+                    <h3 className={`text-xs font-bold uppercase tracking-wider ${
+                      recon.discrepancy?.exists ? 'text-amber-400' : 'text-[#8ff59c]'
+                    }`}>
+                      {recon.discrepancy?.exists ? 'Invoice Reconciliation Issue' : 'Financial Reconciliation Verified'}
+                    </h3>
+                    <p className="text-xs text-slate-300 mt-0.5 font-medium">
+                      {recon.discrepancy?.exists
+                        ? (recon.discrepancy.message || 'Line-item total does not match the stated invoice subtotal.')
+                        : 'All line items, subtotal, and tax amounts match the invoice total.'}
+                    </p>
+                  </div>
+                </div>
+
+                <span className={`px-2.5 py-0.5 rounded-full text-[10px] font-bold uppercase ${
+                  recon.discrepancy?.exists
+                    ? 'bg-amber-500/10 text-amber-400 border border-amber-500/20'
+                    : 'bg-[#8ff59c]/10 text-[#8ff59c] border border-[#8ff59c]/20'
+                }`}>
+                  {recon.discrepancy?.exists ? (recon.discrepancy.severity || 'Warning') : 'Verified'}
+                </span>
+              </div>
+
+              {/* Monetary Comparison Grid */}
+              <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+                <div className="p-3.5 bg-[#12151b] border border-[#252932] rounded-2xl">
+                  <span className="text-[#7e8695] text-[10px] uppercase font-bold">Calculated Line-Item Subtotal</span>
+                  <p className="text-sm font-mono font-bold text-white mt-1">
+                    {formatCurrency(recon.line_items_total, recon.currency)}
+                  </p>
+                </div>
+
+                <div className="p-3.5 bg-[#12151b] border border-[#252932] rounded-2xl">
+                  <span className="text-[#7e8695] text-[10px] uppercase font-bold">Invoice Stated Subtotal</span>
+                  <p className="text-sm font-mono font-bold text-white mt-1">
+                    {formatCurrency(recon.invoice_subtotal, recon.currency)}
+                  </p>
+                </div>
+
+                <div className={`p-3.5 rounded-2xl border ${
+                  recon.discrepancy?.exists
+                    ? 'bg-amber-500/10 border-amber-500/20'
+                    : 'bg-[#12151b] border-[#252932]'
+                }`}>
+                  <span className={`text-[10px] uppercase font-bold ${
+                    recon.discrepancy?.exists ? 'text-amber-400' : 'text-[#7e8695]'
+                  }`}>
+                    Difference
+                  </span>
+                  <p className={`text-sm font-mono font-bold mt-1 ${
+                    recon.discrepancy?.exists ? 'text-amber-300' : 'text-[#8ff59c]'
+                  }`}>
+                    {formatCurrency(recon.discrepancy?.amount || 0, recon.currency)}
+                  </p>
+                </div>
+              </div>
+
+              {/* Calculation Checks Matrix */}
+              <div className="bg-[#12151b] p-4 rounded-2xl border border-[#252932] space-y-2">
+                <span className="text-[10px] font-bold text-[#7e8695] uppercase tracking-wider block">
+                  Calculation Checks
+                </span>
+                <div className="space-y-1.5 text-xs">
+                  <div className="flex items-center justify-between py-1 border-b border-[#252932]/50">
+                    <span className="text-slate-300">Line items → Subtotal</span>
+                    {recon.checks.line_items_match_subtotal === true && (
+                      <span className="inline-flex items-center gap-1 text-[#8ff59c] font-medium text-xs">
+                        <CheckCircle2 className="w-3.5 h-3.5" /> Matches
+                      </span>
+                    )}
+                    {recon.checks.line_items_match_subtotal === false && (
+                      <span className="inline-flex items-center gap-1 text-amber-400 font-medium text-xs">
+                        <AlertTriangle className="w-3.5 h-3.5" /> Mismatch
+                      </span>
+                    )}
+                    {recon.checks.line_items_match_subtotal === null && (
+                      <span className="text-[#7e8695] text-xs">N/A</span>
+                    )}
+                  </div>
+
+                  <div className="flex items-center justify-between py-1 border-b border-[#252932]/50">
+                    <span className="text-slate-300">Subtotal + Tax → Total</span>
+                    {recon.checks.subtotal_plus_tax_matches_total === true && (
+                      <span className="inline-flex items-center gap-1 text-[#8ff59c] font-medium text-xs">
+                        <CheckCircle2 className="w-3.5 h-3.5" /> Matches
+                      </span>
+                    )}
+                    {recon.checks.subtotal_plus_tax_matches_total === false && (
+                      <span className="inline-flex items-center gap-1 text-amber-400 font-medium text-xs">
+                        <AlertTriangle className="w-3.5 h-3.5" /> Mismatch
+                      </span>
+                    )}
+                    {recon.checks.subtotal_plus_tax_matches_total === null && (
+                      <span className="text-[#7e8695] text-xs">N/A</span>
+                    )}
+                  </div>
+
+                  <div className="flex items-center justify-between py-1">
+                    <span className="text-slate-300">Line items + Tax → Total</span>
+                    {recon.checks.line_items_plus_tax_matches_total === true && (
+                      <span className="inline-flex items-center gap-1 text-[#8ff59c] font-medium text-xs">
+                        <CheckCircle2 className="w-3.5 h-3.5" /> Matches
+                      </span>
+                    )}
+                    {recon.checks.line_items_plus_tax_matches_total === false && (
+                      <span className="inline-flex items-center gap-1 text-amber-400 font-medium text-xs">
+                        <AlertTriangle className="w-3.5 h-3.5" /> Mismatch
+                      </span>
+                    )}
+                    {recon.checks.line_items_plus_tax_matches_total === null && (
+                      <span className="text-[#7e8695] text-xs">N/A</span>
+                    )}
+                  </div>
+                </div>
+              </div>
+
+              {/* AI Explanation of Reconciliation */}
+              {recon.explanation && (
+                <div className="bg-[#14171f] p-4 rounded-2xl border border-[#252932] text-xs text-slate-300 leading-relaxed">
+                  <div className="flex items-center gap-2 mb-1.5 text-[#8ff59c] font-bold text-[11px] uppercase tracking-wider">
+                    <Sparkles className="w-3.5 h-3.5" />
+                    <span>AI Reconciliation Explanation</span>
+                  </div>
+                  <p>{recon.explanation}</p>
+                </div>
+              )}
+            </div>
+          )}
+
+          {/* AI Executive Summary Card (if different from reconciliation explanation) */}
+          {invoice.summary && invoice.summary !== recon?.explanation && (
             <div className="bg-[#181b21] p-6 rounded-3xl border border-[#252932] shadow-sm">
               <div className="flex items-center gap-2 mb-3 text-[#8ff59c] font-bold text-xs uppercase tracking-wider">
                 <Sparkles className="w-4 h-4" />
@@ -233,12 +461,12 @@ export const InvoiceDetail = () => {
             </div>
           )}
 
-          {/* Potential Issues / Anomalies Box */}
+          {/* Other Flagged Issues & Operational Anomalies (De-duplicated) */}
           {(validationIssues.length > 0 || anomalies.length > 0) && (
             <div className="bg-[#181b21] p-6 rounded-3xl border border-[#252932] shadow-sm space-y-3">
               <div className="flex items-center gap-2 text-amber-400 font-bold text-xs uppercase tracking-wider">
                 <AlertTriangle className="w-4 h-4" />
-                <span>Flagged Discrepancies & Potential Anomalies</span>
+                <span>Operational Alerts & Potential Anomalies</span>
               </div>
 
               <div className="space-y-2">
@@ -265,7 +493,7 @@ export const InvoiceDetail = () => {
                     <AlertTriangle className="w-4 h-4 text-amber-400 shrink-0 mt-0.5" />
                     <div>
                       <span className="font-bold uppercase text-[10px] text-amber-400 block">
-                        Anomaly Alert
+                        Operational Anomaly
                       </span>
                       <span>{anom.description}</span>
                     </div>

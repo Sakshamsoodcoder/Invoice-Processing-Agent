@@ -1,103 +1,309 @@
 import logging
-from typing import Dict, Any, List, Tuple
-from app.schemas.invoice import ValidationResult, ValidationCheckResult
+from typing import Dict, Any, List, Optional
+from app.schemas.invoice import (
+    ValidationResult,
+    ValidationCheckResult,
+    ReconciliationResult,
+    ReconciliationChecks,
+    ReconciliationDiscrepancy,
+)
 
 logger = logging.getLogger("invoice_ai.services.validator")
 
-TOLERANCE = 0.05
+# Configurable tolerance to absorb standard currency/rounding precision differences
+TOLERANCE = 0.01
 
 class InvoiceValidator:
     @staticmethod
-    def validate(invoice_data: Dict[str, Any]) -> ValidationResult:
+    def calculate_reconciliation(
+        line_items: Optional[List[Dict[str, Any]]] = None,
+        subtotal: Optional[float] = None,
+        tax: Optional[float] = None,
+        total: Optional[float] = None,
+        currency: str = "USD"
+    ) -> ReconciliationResult:
         """
-        Executes deterministic rules against extracted invoice data:
-        1. subtotal + tax = total
-        2. quantity * unit_price = line item amount
-        3. sum(line_items) = subtotal
-        4. invoice number exists
-        5. vendor name exists
-        6. invoice date exists
-        7. total exists
-        8. tax >= 0
-        9. quantity >= 0 for all items
+        Independently calculates and reconciles monetary figures:
+        A = sum(all line item amounts)
+        B = invoice stated subtotal
+        C = invoice tax + other charges
+        D = invoice stated total amount due
+
+        Checks:
+        1. Line items match subtotal: A == B
+        2. Subtotal + tax matches total: B + C == D
+        3. Line items + tax matches total: A + C == D
+
+        Preserves original values without overwriting or assuming correctness.
+        """
+        # A: Sum of line items
+        line_items_total: Optional[float] = None
+        if line_items is not None and len(line_items) > 0:
+            # Safely sum amounts including negative values (discounts, credits, adjustments)
+            try:
+                line_items_total = round(
+                    sum(float(item.get("amount", 0.0) or 0.0) for item in line_items), 2
+                )
+            except (ValueError, TypeError):
+                line_items_total = None
+
+        # B: Stated subtotal (do not invent one if missing)
+        invoice_subtotal: Optional[float] = None
+        if subtotal is not None:
+            try:
+                invoice_subtotal = round(float(subtotal), 2)
+            except (ValueError, TypeError):
+                invoice_subtotal = None
+
+        # C: Stated tax and other charges (do not assume 0 unless explicitly provided)
+        tax_and_other_charges: Optional[float] = None
+        if tax is not None:
+            try:
+                tax_and_other_charges = round(float(tax), 2)
+            except (ValueError, TypeError):
+                tax_and_other_charges = None
+
+        # D: Stated total amount due
+        invoice_total: Optional[float] = None
+        if total is not None:
+            try:
+                invoice_total = round(float(total), 2)
+            except (ValueError, TypeError):
+                invoice_total = None
+
+        # Check 1: Line items match subtotal (A == B)
+        check1: Optional[bool] = None
+        if line_items_total is not None and invoice_subtotal is not None:
+            check1 = round(abs(line_items_total - invoice_subtotal), 2) <= TOLERANCE
+
+        # Check 2: Subtotal + tax matches total (B + C == D)
+        check2: Optional[bool] = None
+        if invoice_subtotal is not None and tax_and_other_charges is not None and invoice_total is not None:
+            expected_total_from_sub = round(invoice_subtotal + tax_and_other_charges, 2)
+            check2 = round(abs(expected_total_from_sub - invoice_total), 2) <= TOLERANCE
+
+        # Check 3: Line items + tax matches total (A + C == D)
+        check3: Optional[bool] = None
+        if line_items_total is not None and tax_and_other_charges is not None and invoice_total is not None:
+            expected_total_from_items = round(line_items_total + tax_and_other_charges, 2)
+            check3 = round(abs(expected_total_from_items - invoice_total), 2) <= TOLERANCE
+
+        checks = ReconciliationChecks(
+            line_items_match_subtotal=check1,
+            subtotal_plus_tax_matches_total=check2,
+            line_items_plus_tax_matches_total=check3
+        )
+
+        # Discrepancy & Explanation Synthesis
+        exists = False
+        discrepancy_amount: Optional[float] = None
+        discrepancy_type = "NONE"
+        severity = "INFO"
+        message: Optional[str] = None
+        explanation: Optional[str] = None
+
+        if check1 is True and check2 is True:
+            # Case 1: All primary calculations match
+            exists = False
+            discrepancy_type = "NONE"
+            severity = "INFO"
+            message = "All monetary calculations and reconciliation checks match."
+            explanation = "The line items, subtotal, tax, and total amount due reconcile consistently across all checks."
+
+        elif check1 is False and check2 is True:
+            # Case 2: Line items != Subtotal, but Subtotal + Tax == Total
+            # (The exact issue reported by the user)
+            exists = True
+            diff = round(abs(line_items_total - invoice_subtotal), 2)
+            discrepancy_amount = diff
+            discrepancy_type = "SUBTOTAL_LINE_ITEM_MISMATCH"
+            severity = "WARNING"
+            message = (
+                f"Line-item total ({currency} {line_items_total:,.2f}) does not match "
+                f"the stated invoice subtotal ({currency} {invoice_subtotal:,.2f}). "
+                f"Difference: {currency} {diff:,.2f}."
+            )
+            explanation = (
+                f"The invoice contains a {currency} {diff:,.2f} discrepancy between the sum of its line items "
+                f"({currency} {line_items_total:,.2f}) and the stated subtotal ({currency} {invoice_subtotal:,.2f}). "
+                f"However, the stated subtotal plus tax/other charges ({currency} {tax_and_other_charges:,.2f}) "
+                f"equals the stated total amount due ({currency} {invoice_total:,.2f}). "
+                f"The conflicting values should be reviewed against the original invoice or supporting documentation."
+            )
+
+        elif check1 is True and check2 is False:
+            # Case 3: Line items == Subtotal, but Subtotal + Tax != Total
+            exists = True
+            expected_total = round(invoice_subtotal + tax_and_other_charges, 2)
+            diff = round(abs(expected_total - invoice_total), 2)
+            discrepancy_amount = diff
+            discrepancy_type = "TOTAL_CALCULATION_MISMATCH"
+            severity = "WARNING"
+            message = (
+                f"Stated subtotal ({currency} {invoice_subtotal:,.2f}) plus tax "
+                f"({currency} {tax_and_other_charges:,.2f}) equals {currency} {expected_total:,.2f}, "
+                f"which does not match the stated total ({currency} {invoice_total:,.2f}). "
+                f"Difference: {currency} {diff:,.2f}."
+            )
+            explanation = (
+                f"The stated subtotal plus tax does not match the stated invoice total amount due. "
+                f"Expected {currency} {expected_total:,.2f} but extracted {currency} {invoice_total:,.2f} (diff: {currency} {diff:,.2f}). "
+                f"Please verify if additional fees, discounts, or withholding were omitted."
+            )
+
+        elif check1 is False and check2 is False:
+            # Case 4: Line items != Subtotal AND Subtotal + Tax != Total
+            exists = True
+            if check3 is True:
+                diff = round(abs(line_items_total - invoice_subtotal), 2)
+                discrepancy_amount = diff
+                discrepancy_type = "SUBTOTAL_LINE_ITEM_MISMATCH"
+                severity = "WARNING"
+                message = (
+                    f"Line items + tax matches total ({currency} {invoice_total:,.2f}), "
+                    f"but stated subtotal ({currency} {invoice_subtotal:,.2f}) differs by {currency} {diff:,.2f}."
+                )
+                explanation = (
+                    f"The sum of line items ({currency} {line_items_total:,.2f}) plus tax "
+                    f"({currency} {tax_and_other_charges:,.2f}) accurately equals the stated total ({currency} {invoice_total:,.2f}). "
+                    f"However, the stated subtotal ({currency} {invoice_subtotal:,.2f}) conflicts by {currency} {diff:,.2f}. "
+                    f"The printed subtotal may be inaccurate or exclude item discounts."
+                )
+            else:
+                discrepancy_type = "MULTIPLE_CALCULATION_MISMATCHES"
+                severity = "WARNING"
+                diff1 = abs(line_items_total - invoice_subtotal) if (line_items_total is not None and invoice_subtotal is not None) else 0.0
+                discrepancy_amount = round(diff1, 2)
+                message = "Multiple calculation inconsistencies detected across line items, subtotal, and total."
+                explanation = (
+                    f"Multiple monetary figures conflict on this document. The sum of line items "
+                    f"({currency} {line_items_total:,.2f if line_items_total is not None else 'N/A'}) does not match "
+                    f"the subtotal ({currency} {invoice_subtotal:,.2f if invoice_subtotal is not None else 'N/A'}), "
+                    f"and subtotal + tax does not equal the stated total ({currency} {invoice_total:,.2f if invoice_total is not None else 'N/A'}). "
+                    f"Requires manual accounts payable review."
+                )
+
+        discrepancy = ReconciliationDiscrepancy(
+            exists=exists,
+            amount=discrepancy_amount,
+            type=discrepancy_type,
+            severity=severity,
+            message=message
+        )
+
+        return ReconciliationResult(
+            line_items_total=line_items_total,
+            invoice_subtotal=invoice_subtotal,
+            tax_and_other_charges=tax_and_other_charges,
+            invoice_total=invoice_total,
+            currency=currency,
+            checks=checks,
+            discrepancy=discrepancy,
+            explanation=explanation
+        )
+
+    @classmethod
+    def validate(cls, invoice_data: Dict[str, Any]) -> ValidationResult:
+        """
+        Executes deterministic validation and structured reconciliation rules:
+        1. Monetary reconciliation (A: Line items, B: Subtotal, C: Tax, D: Total)
+        2. Line item quantity * unit_price = amount calculations
+        3. Mandatory invoice header presence (Invoice #, Vendor, Date, Total)
+        4. Non-negative validation on tax & quantities
         """
         checks: List[ValidationCheckResult] = []
         issues: List[str] = []
 
-        subtotal = invoice_data.get("subtotal") or 0.0
-        tax = invoice_data.get("tax") or 0.0
-        total = invoice_data.get("total") or 0.0
-        line_items = invoice_data.get("line_items") or []
         currency = invoice_data.get("currency") or "USD"
+        line_items = invoice_data.get("line_items") or []
+        subtotal = invoice_data.get("subtotal")
+        tax = invoice_data.get("tax")
+        total = invoice_data.get("total")
         invoice_number = invoice_data.get("invoice_number")
         vendor_name = invoice_data.get("vendor_name")
         invoice_date = invoice_data.get("invoice_date")
 
-        # 1. Total Math Check: subtotal + tax = total
-        expected_total = round(subtotal + tax, 2)
-        total_mismatch = abs(expected_total - total) > TOLERANCE
-        if total_mismatch:
-            msg = f"Mathematical Mismatch: Subtotal ({currency} {subtotal:.2f}) + Tax ({currency} {tax:.2f}) = {currency} {expected_total:.2f}, but extracted Total is {currency} {total:.2f} (diff: {currency} {abs(expected_total - total):.2f})"
-            issues.append(msg)
+        # 1. Independent Monetary Reconciliation
+        recon = cls.calculate_reconciliation(
+            line_items=line_items,
+            subtotal=subtotal,
+            tax=tax,
+            total=total,
+            currency=currency
+        )
+
+        # Line-item reconciliation check result
+        if recon.checks.line_items_match_subtotal is not None:
             checks.append(ValidationCheckResult(
-                name="Total Math (Subtotal + Tax = Total)",
-                passed=False,
-                expected=f"{currency} {expected_total:.2f}",
-                actual=f"{currency} {total:.2f}",
-                message=msg
-            ))
-        else:
-            checks.append(ValidationCheckResult(
-                name="Total Math (Subtotal + Tax = Total)",
-                passed=True,
-                expected=f"{currency} {expected_total:.2f}",
-                actual=f"{currency} {total:.2f}",
-                message=f"Subtotal + Tax matches Total within tolerance ({currency} {total:.2f})."
+                name="Line Items Sum vs Subtotal",
+                passed=recon.checks.line_items_match_subtotal,
+                expected=f"{currency} {recon.invoice_subtotal:,.2f}",
+                actual=f"{currency} {recon.line_items_total:,.2f}",
+                message=(
+                    f"Sum of line items matches Subtotal ({currency} {recon.invoice_subtotal:,.2f})."
+                    if recon.checks.line_items_match_subtotal
+                    else f"Line-item sum ({currency} {recon.line_items_total:,.2f}) does not match Subtotal ({currency} {recon.invoice_subtotal:,.2f})."
+                )
             ))
 
-        # 2. Line items math: quantity * unit_price = amount
+        # Subtotal + Tax reconciliation check result
+        if recon.checks.subtotal_plus_tax_matches_total is not None:
+            expected_tot = round((recon.invoice_subtotal or 0.0) + (recon.tax_and_other_charges or 0.0), 2)
+            checks.append(ValidationCheckResult(
+                name="Total Math (Subtotal + Tax = Total)",
+                passed=recon.checks.subtotal_plus_tax_matches_total,
+                expected=f"{currency} {expected_tot:,.2f}",
+                actual=f"{currency} {recon.invoice_total:,.2f}",
+                message=(
+                    f"Subtotal + Tax matches Total within tolerance ({currency} {recon.invoice_total:,.2f})."
+                    if recon.checks.subtotal_plus_tax_matches_total
+                    else f"Subtotal ({currency} {recon.invoice_subtotal:,.2f}) + Tax ({currency} {recon.tax_and_other_charges:,.2f}) != Total ({currency} {recon.invoice_total:,.2f})."
+                )
+            ))
+
+        # Line items + Tax reconciliation check result
+        if recon.checks.line_items_plus_tax_matches_total is not None:
+            expected_tot_items = round((recon.line_items_total or 0.0) + (recon.tax_and_other_charges or 0.0), 2)
+            checks.append(ValidationCheckResult(
+                name="Line Items + Tax vs Total",
+                passed=recon.checks.line_items_plus_tax_matches_total,
+                expected=f"{currency} {expected_tot_items:,.2f}",
+                actual=f"{currency} {recon.invoice_total:,.2f}",
+                message=(
+                    f"Line items + Tax matches Total ({currency} {recon.invoice_total:,.2f})."
+                    if recon.checks.line_items_plus_tax_matches_total
+                    else f"Line items + Tax ({currency} {expected_tot_items:,.2f}) != Total ({currency} {recon.invoice_total:,.2f})."
+                )
+            ))
+
+        # Single underlying reconciliation issue (avoids multiple confusing alerts)
+        if recon.discrepancy.exists and recon.discrepancy.message:
+            issues.append(f"Reconciliation Warning: {recon.discrepancy.message}")
+
+        # 2. Line Items Mathematics: Quantity * Unit Price = Amount
         item_math_passed = True
         for idx, item in enumerate(line_items, 1):
-            qty = item.get("quantity") or 0.0
-            price = item.get("unit_price") or 0.0
-            amt = item.get("amount") or 0.0
-            expected_amt = round(qty * price, 2)
-            if abs(expected_amt - amt) > TOLERANCE:
-                item_math_passed = False
-                desc = item.get("description", f"Item #{idx}")
-                msg = f"Line Item Mismatch on '{desc}': {qty} × {currency} {price:.2f} = {currency} {expected_amt:.2f}, but line amount is {currency} {amt:.2f}"
-                issues.append(msg)
+            qty = item.get("quantity")
+            price = item.get("unit_price")
+            amt = item.get("amount")
+            if qty is not None and price is not None and amt is not None:
+                expected_amt = round(float(qty) * float(price), 2)
+                if abs(expected_amt - float(amt)) > TOLERANCE:
+                    item_math_passed = False
+                    desc = item.get("description", f"Item #{idx}")
+                    issues.append(
+                        f"Line Item Calculation Mismatch on '{desc}': "
+                        f"{qty} × {currency} {price:.2f} = {currency} {expected_amt:.2f}, but line amount is {currency} {amt:.2f}"
+                    )
 
-        checks.append(ValidationCheckResult(
-            name="Line Item Calculations (Qty × Unit Price = Amount)",
-            passed=item_math_passed,
-            expected="All line calculations correct",
-            actual="Discrepancies found" if not item_math_passed else "All items verified",
-            message="All line item quantities and prices match amounts." if item_math_passed else "One or more line items have mathematical calculation discrepancies."
-        ))
-
-        # 3. Sum of Line items vs Subtotal
         if line_items:
-            items_sum = round(sum(item.get("amount", 0.0) for item in line_items), 2)
-            sum_mismatch = abs(items_sum - subtotal) > TOLERANCE
-            if sum_mismatch:
-                msg = f"Subtotal Discrepancy: Sum of line items ({currency} {items_sum:.2f}) does not match invoice Subtotal ({currency} {subtotal:.2f})"
-                issues.append(msg)
-                checks.append(ValidationCheckResult(
-                    name="Line Items Sum vs Subtotal",
-                    passed=False,
-                    expected=f"{currency} {subtotal:.2f}",
-                    actual=f"{currency} {items_sum:.2f}",
-                    message=msg
-                ))
-            else:
-                checks.append(ValidationCheckResult(
-                    name="Line Items Sum vs Subtotal",
-                    passed=True,
-                    expected=f"{currency} {subtotal:.2f}",
-                    actual=f"{currency} {items_sum:.2f}",
-                    message=f"Sum of line items matches Subtotal ({currency} {subtotal:.2f})."
-                ))
+            checks.append(ValidationCheckResult(
+                name="Line Item Calculations (Qty × Unit Price = Amount)",
+                passed=item_math_passed,
+                expected="All line calculations correct",
+                actual="Discrepancies found" if not item_math_passed else "All items verified",
+                message="All line item quantities and prices match amounts." if item_math_passed else "One or more line items have calculation discrepancies."
+            ))
         else:
             checks.append(ValidationCheckResult(
                 name="Line Items Presence",
@@ -106,9 +312,8 @@ class InvoiceValidator:
                 actual="0 items",
                 message="No individual line items were extracted."
             ))
-            issues.append("No line items found on invoice.")
 
-        # 4. Mandatory Field: Invoice Number
+        # 3. Mandatory Fields: Invoice Number, Vendor Name, Invoice Date, Total
         has_inv_num = bool(invoice_number and str(invoice_number).strip())
         checks.append(ValidationCheckResult(
             name="Invoice Number Field",
@@ -120,7 +325,6 @@ class InvoiceValidator:
         if not has_inv_num:
             issues.append("Missing mandatory field: Invoice Number")
 
-        # 5. Mandatory Field: Vendor Name
         has_vendor = bool(vendor_name and str(vendor_name).strip())
         checks.append(ValidationCheckResult(
             name="Vendor Name Field",
@@ -132,7 +336,6 @@ class InvoiceValidator:
         if not has_vendor:
             issues.append("Missing mandatory field: Vendor Name")
 
-        # 6. Mandatory Field: Invoice Date
         has_date = bool(invoice_date and str(invoice_date).strip())
         checks.append(ValidationCheckResult(
             name="Invoice Date Field",
@@ -144,32 +347,31 @@ class InvoiceValidator:
         if not has_date:
             issues.append("Missing mandatory field: Invoice Date")
 
-        # 7. Mandatory Field: Total Amount
-        has_total = total is not None and total > 0
+        has_total = total is not None and float(total) > 0
         checks.append(ValidationCheckResult(
             name="Total Amount Field",
             passed=has_total,
             expected="Positive number",
-            actual=f"{currency} {total:.2f}" if total is not None else "Missing",
+            actual=f"{currency} {float(total):.2f}" if (total is not None and str(total).strip()) else "Missing",
             message="Total amount is positive." if has_total else "Total invoice amount is zero or missing."
         ))
         if not has_total:
             issues.append("Total amount must be greater than zero.")
 
-        # 8. Tax sign check: tax >= 0
-        tax_non_negative = tax >= 0
-        checks.append(ValidationCheckResult(
-            name="Tax Non-Negative Check",
-            passed=tax_non_negative,
-            expected=">= 0",
-            actual=f"{currency} {tax:.2f}",
-            message="Tax amount is valid (non-negative)." if tax_non_negative else f"Tax amount cannot be negative ({currency} {tax:.2f})."
-        ))
-        if not tax_non_negative:
-            issues.append("Tax amount is negative.")
+        # 4. Sign Checks (tax non-negative, quantity non-negative)
+        if tax is not None:
+            tax_non_negative = float(tax) >= 0
+            checks.append(ValidationCheckResult(
+                name="Tax Non-Negative Check",
+                passed=tax_non_negative,
+                expected=">= 0",
+                actual=f"{currency} {float(tax):.2f}",
+                message="Tax amount is valid (non-negative)." if tax_non_negative else f"Tax amount cannot be negative ({currency} {float(tax):.2f})."
+            ))
+            if not tax_non_negative:
+                issues.append("Tax amount is negative.")
 
-        # 9. Quantity sign check: all quantity >= 0
-        negative_qty_items = [item for item in line_items if item.get("quantity", 0.0) < 0]
+        negative_qty_items = [item for item in line_items if float(item.get("quantity", 0.0) or 0.0) < 0]
         qty_passed = len(negative_qty_items) == 0
         checks.append(ValidationCheckResult(
             name="Line Item Quantities Non-Negative",
@@ -181,7 +383,9 @@ class InvoiceValidator:
         if not qty_passed:
             issues.append("Negative quantities detected in line items.")
 
-        # Final validity determination
+        # Final validity determination:
+        # A reconciliation mismatch requires review (status: "Needs Review"),
+        # but the document is NOT completely invalid or rejected.
         is_valid = len(issues) == 0
         status_str = "Valid" if is_valid else "Needs Review"
 
@@ -189,7 +393,9 @@ class InvoiceValidator:
             is_valid=is_valid,
             status=status_str,
             checks=checks,
-            issues=issues
+            issues=issues,
+            reconciliation=recon
         )
 
 validator = InvoiceValidator()
+

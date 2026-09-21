@@ -66,7 +66,7 @@ class AIAnalysisService:
         """Invokes Microsoft Foundry / Azure OpenAI gpt-4.1-mini with structured JSON prompt."""
         system_prompt = (
             "You are an expert AI financial auditor and accounts payable assistant. "
-            "Analyze the provided structured invoice data, deterministic validation results, and anomaly flags. "
+            "Analyze the provided structured invoice data, deterministic reconciliation checks, and anomaly flags. "
             "Return a strictly valid JSON object with this exact schema:\n"
             "{\n"
             '  "summary": "Concise executive summary of the invoice",\n'
@@ -76,10 +76,14 @@ class AIAnalysisService:
             '  "anomalies": ["list of detected suspicious inconsistencies or potential anomalies"],\n'
             '  "recommendations": ["clear, actionable steps for accounts payable staff"]\n'
             "}\n"
-            "CRITICAL RULES:\n"
+            "CRITICAL INSTRUCTIONS:\n"
+            "- Distinguish carefully between: (1) extracted document facts, (2) calculated values, (3) validation results, and (4) interpretation/recommendation.\n"
+            "- Do NOT blindly trust the calculated line-item total or the stated subtotal. When values conflict, state that the document contains conflicting monetary values requiring human verification.\n"
+            "- Never declare which amount is 'correct' when the document itself is contradictory.\n"
+            "- If line items do not match the stated subtotal, but subtotal + tax matches total: note the discrepancy objectively, observe that subtotal + tax reconciles with total, and recommend reviewing against the original invoice.\n"
             "- Do not invent missing information. If information is missing, mark it explicitly as missing.\n"
-            "- If there are mathematical mismatches or missing required fields, status must be 'needs_review'.\n"
-            "- Frame inconsistencies objectively as 'potential anomalies' or 'requires review', never declare fraud."
+            "- Avoid duplicate alerts for the same underlying discrepancy.\n"
+            "- Frame inconsistencies objectively as 'requires review' or 'potential discrepancy', never declare fraud."
         )
 
         user_content = {
@@ -119,31 +123,54 @@ class AIAnalysisService:
     ) -> AIAnalysisResult:
         """
         Deterministic, realistic mock analysis for development mode.
+        Distinguishes extracted facts from calculated figures objectively.
         """
         vendor = invoice_data.get("vendor_name") or "Unspecified Vendor"
         inv_num = invoice_data.get("invoice_number") or "N/A"
         total = invoice_data.get("total") or 0.0
+        subtotal = invoice_data.get("subtotal") or 0.0
+        tax = invoice_data.get("tax") or 0.0
         currency = invoice_data.get("currency") or "USD"
         items = invoice_data.get("line_items") or []
         item_count = len(items)
+        items_sum = round(sum(float(i.get("amount", 0.0) or 0.0) for i in items), 2) if items else 0.0
 
         has_issues = len(validation_issues) > 0 or len(anomalies) > 0
         status_val = "needs_review" if has_issues else "valid"
-        confidence_val = 0.96 if not has_issues else 0.82
+        confidence_val = 0.96 if not has_issues else 0.88
 
-        items_desc = f"comprising {item_count} line item{'s' if item_count != 1 else ''}" if item_count > 0 else "with no itemized lines"
-        summary = (
-            f"Invoice #{inv_num} issued by {vendor} for a total of {currency} {total:,.2f} ({items_desc}). "
-        )
-        if has_issues:
-            summary += f"The system flagged {len(validation_issues)} validation item(s) and {len(anomalies)} potential anomaly item(s) requiring human verification prior to disbursement."
+        # Check for specific reconciliation discrepancy scenario
+        subtotal_mismatch = items and abs(items_sum - subtotal) > 0.01
+        sub_tax_matches_tot = abs(round(subtotal + tax, 2) - total) <= 0.01
+
+        if subtotal_mismatch and sub_tax_matches_tot:
+            diff = round(abs(items_sum - subtotal), 2)
+            summary = (
+                f"The invoice contains a {currency} {diff:,.2f} discrepancy between the sum of its line items "
+                f"({currency} {items_sum:,.2f}) and the stated subtotal ({currency} {subtotal:,.2f}). "
+                f"However, the stated subtotal plus tax/other charges ({currency} {tax:,.2f}) equals the stated total amount due ({currency} {total:,.2f}). "
+                f"The conflicting values should be reviewed against the original invoice or supporting documentation."
+            )
+        elif has_issues:
+            summary = (
+                f"Invoice #{inv_num} issued by {vendor} for a stated total of {currency} {total:,.2f}. "
+                f"The system identified {len(validation_issues)} validation item(s) and {len(anomalies)} potential anomaly item(s) requiring human verification prior to disbursement."
+            )
         else:
-            summary += "All mathematical calculations, tax assessments, and mandatory invoice headers comply with standard procurement policies."
+            summary = (
+                f"Invoice #{inv_num} issued by {vendor} for a total of {currency} {total:,.2f} "
+                f"({item_count} line item{'s' if item_count != 1 else ''}). "
+                f"All mathematical calculations, tax assessments, and mandatory invoice headers comply with standard procurement policies."
+            )
 
         recommendations = []
-        if has_issues:
-            if any("Mathematical Mismatch" in iss for iss in validation_issues):
-                recommendations.append("Request a corrected invoice or credit memo from vendor to reconcile total amount.")
+        if subtotal_mismatch and sub_tax_matches_tot:
+            recommendations.append("Review itemized lines against invoice header to confirm whether an unlisted discount or billing adjustment applies.")
+            recommendations.append("Verify whether line items represent gross amounts before an unstated subtotal deduction.")
+            recommendations.append("Confirm correct billing amount with vendor prior to accounts payable approval.")
+        elif has_issues:
+            if any("Calculation" in iss or "Mismatch" in iss for iss in validation_issues):
+                recommendations.append("Request a corrected invoice or clarification memo from vendor to reconcile total amount.")
             if any("Potential Duplicate" in anom for anom in anomalies):
                 recommendations.append("Cross-reference AP payment ledger to ensure invoice has not previously been disbursed.")
             if any("Missing mandatory field" in iss for iss in validation_issues):
