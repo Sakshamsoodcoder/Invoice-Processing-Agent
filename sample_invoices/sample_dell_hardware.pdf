@@ -1,0 +1,50 @@
+%PDF-1.4
+1 0 obj
+<< /Type /Catalog /Pages 2 0 R >>
+endobj
+2 0 obj
+<< /Type /Pages /Kids [3 0 R] /Count 1 >>
+endobj
+3 0 obj
+<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Contents 4 0 R /Resources << /Font << /F1 5 0 R >> >> >>
+endobj
+4 0 obj
+<< /Length 598 >>
+stream
+BT
+/F1 12 Tf
+50 750 Td
+18 TL
+(INVOICE: DELL-882109) '
+(VENDOR: Dell Technologies Global) '
+(TITLE: Hardware Workstation Procurement) '
+(DATE: 2026-03-01) '
+(DUE DATE: 2026-03-31) '
+(--------------------------------------------------) '
+(LINE ITEMS:) '
+(- Dell XPS 15 Workstation 32GB RAM | Qty: 2.0 | Price: $1850.00 | Amt: $3700.00) '
+(- Dell UltraSharp 27 4K Monitor | Qty: 1.0 | Price: $500.00 | Amt: $500.00) '
+(--------------------------------------------------) '
+(SUBTOTAL: $4200.00) '
+(TAX: $378.00) '
+(TOTAL AMOUNT: $4578.00) '
+(PAYMENT TERMS: Net 30) '
+(THANK YOU FOR YOUR BUSINESS!) '
+ET
+endstream
+endobj
+5 0 obj
+<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>
+endobj
+xref
+0 6
+0000000000 65535 f 
+0000000010 00000 n 
+0000000060 00000 n 
+0000000117 00000 n 
+0000000234 00000 n 
+trailer
+<< /Size 6 /Root 1 0 R >>
+startxref
+500
+%%EOF

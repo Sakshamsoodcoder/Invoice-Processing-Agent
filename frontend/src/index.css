@@ -1,0 +1,40 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  --rivlo-bg: #0c0e12;
+  --rivlo-surface: #12151b;
+  --rivlo-card: #181b21;
+  --rivlo-card-hover: #1e222b;
+  --rivlo-border: #252932;
+  --rivlo-border-subtle: #1c2027;
+  --rivlo-mint: #8ff59c;
+  --rivlo-mint-hover: #7de48b;
+  --rivlo-lavender: #8b8cf8;
+  --rivlo-text: #f3f4f6;
+  --rivlo-muted: #7e8695;
+}
+
+@layer base {
+  body {
+    @apply bg-[#0c0e12] text-slate-100 antialiased font-sans selection:bg-[#8ff59c] selection:text-black;
+  }
+}
+
+/* Smooth custom scrollbars matching dark theme */
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+::-webkit-scrollbar-track {
+  background: #12151b;
+}
+::-webkit-scrollbar-thumb {
+  background: #252932;
+  border-radius: 9999px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: #383e4c;
+}
+
