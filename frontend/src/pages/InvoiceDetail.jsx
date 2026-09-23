@@ -100,7 +100,7 @@ export const InvoiceDetail = () => {
   const isValid = invoice.status === 'Valid';
   const fileUrl = invoice.blob_url?.startsWith('http')
     ? invoice.blob_url
-    : `${API_BASE_URL}${invoice.blob_url || ''}`;
+    : `${API_BASE_URL}${invoice.blob_url ? (invoice.blob_url.startsWith('/') ? '' : '/') + invoice.blob_url : ''}`;
 
   // Structured reconciliation derived from backend or client fallback
   const recon = invoice.reconciliation || (() => {

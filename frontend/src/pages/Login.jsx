@@ -37,7 +37,7 @@ export const Login = () => {
         <div className="w-12 h-12 rounded-2xl bg-[#8ff59c]/10 border border-[#8ff59c]/30 flex items-center justify-center mx-auto mb-4">
           <Sparkles className="w-6 h-6 text-[#8ff59c]" />
         </div>
-        <h2 className="text-2xl font-bold text-white tracking-tight">Sign In to Rivlo AI</h2>
+        <h2 className="text-2xl font-bold text-white tracking-tight">Sign In to InvoiceAI</h2>
         <p className="text-xs text-[#7e8695] mt-2">
           Access your autonomous AI invoice processing dashboard & analytics.
         </p>

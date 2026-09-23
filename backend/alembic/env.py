@@ -24,7 +24,7 @@ from app.core.config import settings
 
 target_metadata = Base.metadata
 
-config.set_main_option("sqlalchemy.url", settings.DATABASE_URL)
+config.set_main_option("sqlalchemy.url", settings.normalized_database_url)
 
 
 

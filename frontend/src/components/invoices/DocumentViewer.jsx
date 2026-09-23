@@ -8,7 +8,7 @@ export const DocumentViewer = ({ blobUrl, fileName, contentType }) => {
   // Construct absolute file URL
   const fileUrl = blobUrl?.startsWith('http')
     ? blobUrl
-    : `${API_BASE_URL}${blobUrl || ''}`;
+    : `${API_BASE_URL}${blobUrl ? (blobUrl.startsWith('/') ? '' : '/') + blobUrl : ''}`;
 
   const isPdf = fileName?.toLowerCase().endsWith('.pdf') || contentType?.includes('pdf');
   const isImage = fileName?.match(/\.(jpe?g|png|webp)$/i) || contentType?.includes('image');

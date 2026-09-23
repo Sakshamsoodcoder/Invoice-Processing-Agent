@@ -23,6 +23,7 @@ htmlcov/
 # Local file storage
 backend/uploads/*
 !backend/uploads/.gitkeep
+uploads/
 
 # Node / Frontend
 frontend/node_modules/

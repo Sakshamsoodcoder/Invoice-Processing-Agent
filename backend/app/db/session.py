@@ -7,7 +7,7 @@ from app.core.config import settings
 logger = logging.getLogger("invoice_ai.db")
 
 def get_engine():
-    db_url = settings.DATABASE_URL
+    db_url = settings.normalized_database_url
     connect_args = {}
     if db_url.startswith("sqlite"):
         connect_args = {"check_same_thread": False}
